@@ -1,4 +1,3 @@
-
 import java.io.*;
 import java.net.*;
 import java.time.LocalDateTime;
@@ -7,116 +6,80 @@ import java.util.*;
 
 public class SyncoreServer {
     private static final int PORT = 5000;
-    
-    private static final List<PrintWriter> clientWriters = Collections.synchronizedList(new ArrayList<>());
-    private static final LinkedList<String> messageHistory = new LinkedList<>(); 
-    private static final int HISTORY_LIMIT = 10;
+    private static final List<PrintWriter> activeClients = Collections.synchronizedList(new ArrayList<>());
+    private static final LinkedList<String> history = new LinkedList<>();
+    private static final int MAX_HISTORY = 20;
 
     public static void main(String[] args) {
-        System.out.println("Syncore Server is running on port " + PORT + "...");
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("New connection established: " + clientSocket.getInetAddress());
-                new Thread(new ClientHandler(clientSocket)).start();
-            }
+        try (ServerSocket server = new ServerSocket(PORT)) {
+            System.out.println("Server connected on port " + PORT);
+            while (true) new Thread(new ConnectionHandler(server.accept())).start();
         } catch (IOException e) {
-            System.err.println("Fatal Server Error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
-    private static synchronized void addMessageToHistory(String message) {
-        messageHistory.add(message);
-        if (messageHistory.size() > HISTORY_LIMIT) {
-            messageHistory.removeFirst();
-        }
-    }
-
-    private static class ClientHandler implements Runnable {
+    private static class ConnectionHandler implements Runnable {
         private Socket socket;
         private PrintWriter out;
         private String username;
 
-        public ClientHandler(Socket socket) {
-            this.socket = socket;
-        }
+        public ConnectionHandler(Socket s) { this.socket = s; }
 
         public void run() {
-            try {
+            try (
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(socket.getOutputStream(), true);
-                
-                username = in.readLine();
-                String password = in.readLine();
-
-                if (username == null || password == null) return;
-
-                if (!username.matches("^[A-Za-z]+.*\\d+$") || !password.matches("^(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).+$")) {
-                    out.println("Server rejected connection: Invalid credentials format.");
-                    socket.close();
+                PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)
+            ) {
+                this.out = writer;
+                String nameIn = in.readLine();
+                // Enforces: Starts with 3+ letters, ends with numbers
+                if (nameIn == null || !nameIn.matches("^[A-Za-z]{3,}.*\\d+$")) {
+                out.println("ERROR: Username needs 3+ letters followed by any amount of numbers!");
+                  return;
+                }
+                out.println("USER_OK");
+                String passIn = in.readLine();
+                // Enforces: 1 Capital, 1 Special (!@#$%^&*), 8+ characters total
+                if (passIn == null || !passIn.matches("^(?=.*[A-Z])(?=.*[!@#$%^&*]).{8,}$")) {
+                    out.println("ERROR: Password needs 8+ chars, 1 Capital, and 1 Special Char!");
                     return;
                 }
-
-                clientWriters.add(out);
-                
-                // Specific Deliverable: Last 10 Posts displayed to newly connected user
-                synchronized (messageHistory) {
-                    out.println("--- [Last " + messageHistory.size() + " Posts] ---");
-                    for (String oldMsg : messageHistory) {
-                        out.println(oldMsg);
-                    }
-                    out.println("-------------------------");
+                this.username = nameIn;
+                out.println("LOGIN_SUCCESS");
+                activeClients.add(out);
+                synchronized (history) {
+                    out.println("--- [System: Last " + history.size() + " Posts] ---");
+                    for (String h : history) out.println(h);
+                    out.println("--------------------------------");
                 }
-
-                // Specific Deliverable: User Joining Updates 
-                broadcastSystemMessage(username + " has joined the bulletin board!");
-
-                String message;
-                while ((message = in.readLine()) != null) {
-                    if (message.equalsIgnoreCase("exit")) {
-                        break; 
+                broadcast("[SYSTEM]: " + username + " is online.");
+                String msg;
+                while ((msg = in.readLine()) != null) {
+                    if (msg.equalsIgnoreCase("exit")) break;
+                    String post = "[" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("h:mm a")) + "] " + username + ": " + msg;
+                    synchronized (history) {
+                        if (history.size() >= MAX_HISTORY) history.removeFirst();
+                        history.addLast(post);
                     }
-                    // Specific Deliverable: Timed Post Objects with formatted timestamps that updates in real-time
-                    String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("h:mm a, M/d/yyyy"));
-                    String formattedPost = "[" + timestamp + "] " + username + ": " + message;
-                    broadcast(formattedPost);
+                    broadcast(post);
                 }
             } catch (IOException e) {
-                System.out.println("User disconnected abruptly.");
             } finally {
-                if (out != null) {
-                    clientWriters.remove(out);
-                }
-                if (username != null) {
-                    broadcastSystemMessage(username + " has left.");
-                }
-                try { 
-                    socket.close(); 
-                } catch (IOException e) {
-                    System.err.println("Error closing socket: " + e.getMessage());
-                }
+                cleanup();
             }
         }
 
-        private void broadcast(String message) {
-            System.out.println("Broadcasting: " + message);
-            addMessageToHistory(message);
-
-            synchronized (clientWriters) {
-                for (PrintWriter writer : clientWriters) {
-                    writer.println(message);
-                }
+        private void broadcast(String m) {
+            synchronized (activeClients) {
+                for (PrintWriter pw : activeClients) pw.println(m);
             }
         }
 
-        private void broadcastSystemMessage(String msg) {
-            String systemMsg = "[SYSTEM]: " + msg;
-            System.out.println(systemMsg);
-            synchronized (clientWriters) {
-                for (PrintWriter writer : clientWriters) {
-                    writer.println(systemMsg);
-                }
-            }
+        private void cleanup() {
+            if (out != null) activeClients.remove(out);
+            if (username != null) broadcast("[SYSTEM]: " + username + " has signed off.");
+            try { socket.close(); } catch (IOException ignored) {}
         }
     }
 }
